@@ -6,6 +6,8 @@
   "scripts": {
     "dev:tcp": "tsx src/tcp-server.ts",
     "dev:http": "tsx src/http-server.ts",
+    "dev:backend": "tsx src/backend-server.ts",
+    "dev:proxy": "tsx src/proxy-server.ts",
     "start": "tsx src/tcp-server.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
