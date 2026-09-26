@@ -6,6 +6,7 @@ const server = net.createServer((socket) => {
   console.log(
     ` ${socket.remoteAddress} on port ${socket.remotePort} connected on family ${socket.remoteFamily} to ${socket.localAddress} on port ${socket.localPort}`,
   );
+
   socket.on("data", (data) => {
     console.log(`Received data: ${data}`);
     socket.write(`Echo: ${data}`);

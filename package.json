@@ -1,7 +1,7 @@
 {
   "name": "net-flow",
   "version": "1.0.0",
-  "description": "",
+  "description": "A custom reverse proxy and smart load balancer built from scratch with Node.js and TypeScript to explore TCP, HTTP, networking, failure handling, load balancing, observability, and production infrastructure.",
   "main": "index.js",
   "scripts": {
     "dev:tcp": "tsx src/tcp-server.ts",
@@ -12,7 +12,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
-  "author": "",
+  "author": "immaham",
   "license": "ISC",
   "type": "module",
   "devDependencies": {

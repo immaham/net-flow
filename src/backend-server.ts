@@ -1,15 +1,18 @@
 import net from "node:net";
 
-const PORT = 9101;
+const PORT = Number(process.env.PORT) || 9101;
+const INSTANCE_NAME = process.env.INSTANCE_NAME || "backend-1";
 
 const server = net.createServer((socket) => {
+  console.log(`${INSTANCE_NAME}: client connected`);
+
   socket.on("data", (data) => {
     const request = data.toString();
 
-    console.log("Backend received:");
+    console.log(`${INSTANCE_NAME} received:`);
     console.log(request);
 
-    const body = "Hello from backend-1";
+    const body = `Hello from ${INSTANCE_NAME}`;
 
     const response =
       `HTTP/1.1 200 OK\r\n` +
@@ -24,10 +27,10 @@ const server = net.createServer((socket) => {
   });
 
   socket.on("error", (error) => {
-    console.error("Backend socket error:", error);
+    console.error(`${INSTANCE_NAME} socket error:`, error);
   });
 });
 
 server.listen(PORT, () => {
-  console.log(`Backend listening on port ${PORT}`);
+  console.log(`${INSTANCE_NAME} listening on port ${PORT}`);
 });
