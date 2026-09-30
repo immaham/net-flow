@@ -5,6 +5,7 @@ type Backend = {
   port: number;
   name: string;
   activeConnections: number;
+  healthy: boolean;
 };
 
 type LoadBalancingStrategy = "round-robin" | "least-connections";
@@ -19,33 +20,103 @@ const backends: Backend[] = [
     port: 9101,
     name: "backend-1",
     activeConnections: 0,
+    healthy: true,
   },
   {
     host: "localhost",
     port: 9102,
     name: "backend-2",
     activeConnections: 0,
+    healthy: true,
   },
   {
     host: "localhost",
     port: 9103,
     name: "backend-3",
     activeConnections: 0,
+    healthy: true,
   },
 ];
 
+// Health Checking
+function checkBackendHealth(backend: Backend): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(
+      {
+        host: backend.host,
+        port: backend.port,
+      },
+      () => {
+        const request =
+          `GET /health HTTP/1.1\r\n` +
+          `Host: ${backend.host}:${backend.port}\r\n` +
+          `Connection: close\r\n` +
+          `\r\n`;
+
+        socket.write(request);
+      },
+    );
+
+    let response = "";
+
+    socket.on("data", (data) => {
+      response += data.toString();
+    });
+
+    socket.on("end", () => {
+      const statusLine = response.split("\r\n")[0];
+
+      resolve(statusLine.includes("200"));
+    });
+
+    socket.on("error", () => {
+      resolve(false);
+    });
+  });
+}
+
+async function runHealthChecks() {
+  for (const backend of backends) {
+    const healthy = await checkBackendHealth(backend);
+
+    backend.healthy = healthy;
+
+    console.log(`${backend.name}: ${healthy ? "healthy" : "unhealthy"}`);
+  }
+}
+
+runHealthChecks();
+
+setInterval(runHealthChecks, 5000);
+
+function getHealthyBackends() {
+  return backends.filter((backend) => backend.healthy);
+}
+
 let currentIndex = 0;
 
-function getNextBackend(): Backend {
-  const backend = backends[currentIndex];
+function getNextBackend() {
+  const healthyBackends = getHealthyBackends();
 
-  currentIndex = (currentIndex + 1) % backends.length;
+  if (healthyBackends.length === 0) {
+    return undefined;
+  }
+
+  const backend = healthyBackends[currentIndex % healthyBackends.length];
+
+  currentIndex = (currentIndex + 1) % healthyBackends.length;
 
   return backend;
 }
 
-function getLeastConnectionsBackend(): Backend {
-  return backends.reduce((least, backend) => {
+function getLeastConnectionsBackend() {
+  const healthyBackends = getHealthyBackends();
+
+  if (healthyBackends.length === 0) {
+    return undefined;
+  }
+
+  return healthyBackends.reduce((least, backend) => {
     if (backend.activeConnections < least.activeConnections) {
       return backend;
     }
@@ -62,6 +133,21 @@ function selectBackend(): Backend {
   return getLeastConnectionsBackend();
 }
 
+function sendServiceUnavailable(socket: net.Socket) {
+  const body = "No healthy backends available";
+
+  const response =
+    `HTTP/1.1 503 Service Unavailable\r\n` +
+    `Content-Type: text/plain\r\n` +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+    `Connection: close\r\n` +
+    `\r\n` +
+    body;
+
+  socket.write(response);
+  socket.end();
+}
+
 const server = net.createServer((clientSocket) => {
   console.log("Client connected to proxy");
 
@@ -69,6 +155,11 @@ const server = net.createServer((clientSocket) => {
     console.log("Proxy received request");
 
     const backend = selectBackend();
+
+    if (!backend) {
+      sendServiceUnavailable(clientSocket);
+      return;
+    }
 
     console.log(`Selected ${backend.name} (${backend.host}:${backend.port})`);
 

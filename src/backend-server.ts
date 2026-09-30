@@ -9,11 +9,20 @@ const server = net.createServer((socket) => {
   socket.on("data", (data) => {
     const request = data.toString();
 
+    const requestLine = request.split("\r\n")[0];
+
+    const [method, path] = requestLine.split(" ");
+
     console.log(`${INSTANCE_NAME} received:`);
     console.log(request);
 
-    const body = `Hello from ${INSTANCE_NAME}`;
+    let body: string;
 
+    if (path === "/health") {
+      body = "OK";
+    } else {
+      body = `Hello from ${INSTANCE_NAME}`;
+    }
     const response =
       `HTTP/1.1 200 OK\r\n` +
       `Content-Type: text/plain\r\n` +
