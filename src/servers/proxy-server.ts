@@ -1,31 +1,15 @@
 import net from "node:net";
 import { selectBackend } from "../load-balancer/index.js";
-import type { LoadBalancingStrategy } from "../load-balancer/index.js";
-import { backends } from "../config/backends.js";
-import { runHealthChecks } from "../health/health-checker.js";
-
-const PORT = 9000;
-const strategy: LoadBalancingStrategy = "round-robin";
+import { backends, PORT, strategy } from "../config/backends.js";
+import {
+  runHealthChecks,
+  sendServiceUnavailable,
+} from "../health/health-checker.js";
 
 runHealthChecks(backends);
 setInterval(() => {
   runHealthChecks(backends);
 }, 5000);
-
-function sendServiceUnavailable(socket: net.Socket) {
-  const body = "No healthy backends available";
-
-  const response =
-    `HTTP/1.1 503 Service Unavailable\r\n` +
-    `Content-Type: text/plain\r\n` +
-    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-    `Connection: close\r\n` +
-    `\r\n` +
-    body;
-
-  socket.write(response);
-  socket.end();
-}
 
 const server = net.createServer((clientSocket) => {
   console.log("Client connected to proxy");

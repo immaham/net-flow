@@ -1,4 +1,4 @@
-import type { Backend } from "../load-balancer/index.js";
+import type { Backend, LoadBalancingStrategy } from "../load-balancer/index.js";
 
 export const backends: Backend[] = [
   {
@@ -23,3 +23,6 @@ export const backends: Backend[] = [
     healthy: true,
   },
 ];
+
+export const PORT = 9000;
+export const strategy: LoadBalancingStrategy = "round-robin";

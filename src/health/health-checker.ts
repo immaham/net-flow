@@ -46,3 +46,18 @@ export async function runHealthChecks(backends: Backend[]) {
     console.log(`${backend.name}: ${healthy ? "healthy" : "unhealthy"}`);
   }
 }
+
+export function sendServiceUnavailable(socket: net.Socket) {
+  const body = "No healthy backends available";
+
+  const response =
+    `HTTP/1.1 503 Service Unavailable\r\n` +
+    `Content-Type: text/plain\r\n` +
+    `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+    `Connection: close\r\n` +
+    `\r\n` +
+    body;
+
+  socket.write(response);
+  socket.end();
+}
