@@ -1,4 +1,5 @@
-import { getLeastConnectionsBackend, getNextBackend } from "./index.js";
+import { getLeastConnectionsBackend } from "./least-connections.js";
+import { getNextBackend } from "./round-robin.js";
 
 import type { Backend, LoadBalancingStrategy } from "./types.js";
 
@@ -9,12 +10,13 @@ export function getHealthyBackends(backends: Backend[]): Backend[] {
 export function selectBackend(
   backends: Backend[],
   strategy: LoadBalancingStrategy,
+  isAvailable: (backend: Backend) => boolean,
 ): Backend | undefined {
-  const healthyBackends = getHealthyBackends(backends);
+  const availableBackends = backends.filter(isAvailable);
 
   if (strategy === "round-robin") {
-    return getNextBackend(healthyBackends);
+    return getNextBackend(availableBackends);
   }
 
-  return getLeastConnectionsBackend(healthyBackends);
+  return getLeastConnectionsBackend(availableBackends);
 }

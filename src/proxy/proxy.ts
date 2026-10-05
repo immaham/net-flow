@@ -7,6 +7,7 @@ import {
 } from "../load-balancer/connection-tracker.js";
 import { PROXY_CONFIG } from "../config/proxy.js";
 import { sendBadGateway } from "./proxy-errors.js";
+import { getCircuitBreaker } from "../circuit-breaker/registry.js";
 
 export type ProxyRequestOptions = {
   clientSocket: net.Socket;
@@ -35,6 +36,7 @@ function attemptBackend(
   retryCount: number,
 ) {
   attemptedBackends.add(backend.name);
+  const circuit = getCircuitBreaker(backend);
 
   acquireBackend(backend);
 
@@ -44,6 +46,16 @@ function attemptBackend(
 
   let released = false;
   let responseStarted = false;
+  let failureRecorded = false;
+
+  const recordFailure = () => {
+    if (failureRecorded) {
+      return;
+    }
+
+    failureRecorded = true;
+    circuit.recordFailure();
+  };
 
   const releaseConnection = () => {
     if (released) {
@@ -104,6 +116,8 @@ function attemptBackend(
 
   backendSocket.on("data", (data) => {
     responseStarted = true;
+    circuit.recordSuccess();
+
     clientSocket.write(data);
   });
 
@@ -120,6 +134,7 @@ function attemptBackend(
   backendSocket.on("timeout", () => {
     console.error(`${backend.name} connection timeout`);
 
+    recordFailure();
     backendSocket.destroy();
 
     retry();
@@ -128,6 +143,7 @@ function attemptBackend(
   backendSocket.on("error", (error) => {
     console.error(`${backend.name} socket error:`, error);
 
+    recordFailure();
     retry();
   });
 }

@@ -7,6 +7,7 @@ import {
   sendServiceUnavailable,
 } from "../health/health-checker.js";
 import { proxyToBackend } from "../proxy/proxy.js";
+import { isBackendAvailable } from "../circuit-breaker/registry.js";
 
 runHealthChecks(backends);
 
@@ -22,7 +23,7 @@ const server = net.createServer((clientSocket) => {
 
     const requestData = Buffer.isBuffer(data) ? data : Buffer.from(data);
 
-    const backend = selectBackend(backends, strategy);
+    const backend = selectBackend(backends, strategy, isBackendAvailable);
 
     if (!backend) {
       console.error("No healthy backends available");
