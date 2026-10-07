@@ -8,12 +8,21 @@ import {
 import { PROXY_CONFIG } from "../config/proxy.js";
 import { sendBadGateway } from "./proxy-errors.js";
 import { getCircuitBreaker } from "../circuit-breaker/registry.js";
+import type { RequestContext } from "../observability/request-context.js";
+import { log } from "../observability/logger.js";
+import {
+  recordBackendRequest,
+  recordBackendFailure,
+  recordRequestSuccess,
+  recordRequestFailure,
+} from "../observability/metrics.js";
 
 export type ProxyRequestOptions = {
   clientSocket: net.Socket;
   backend: Backend;
   data: Buffer;
   backends: Backend[];
+  context: RequestContext;
 };
 
 export function proxyToBackend({
@@ -21,10 +30,19 @@ export function proxyToBackend({
   backend,
   data,
   backends,
+  context,
 }: ProxyRequestOptions) {
   const attemptedBackends = new Set<string>();
 
-  attemptBackend(clientSocket, backend, data, backends, attemptedBackends, 0);
+  attemptBackend(
+    clientSocket,
+    backend,
+    data,
+    backends,
+    attemptedBackends,
+    0,
+    context,
+  );
 }
 
 function attemptBackend(
@@ -34,28 +52,25 @@ function attemptBackend(
   backends: Backend[],
   attemptedBackends: Set<string>,
   retryCount: number,
+  context: RequestContext,
 ) {
   attemptedBackends.add(backend.name);
+
   const circuit = getCircuitBreaker(backend);
 
   acquireBackend(backend);
+  recordBackendRequest(backend.name);
 
-  console.log(
-    `${backend.name} active connections: ${backend.activeConnections}`,
-  );
+  log("INFO", "Backend connection acquired", {
+    requestId: context.id,
+    backend: backend.name,
+    activeConnections: backend.activeConnections,
+  });
 
   let released = false;
   let responseStarted = false;
   let failureRecorded = false;
-
-  const recordFailure = () => {
-    if (failureRecorded) {
-      return;
-    }
-
-    failureRecorded = true;
-    circuit.recordFailure();
-  };
+  let requestCompleted = false;
 
   const releaseConnection = () => {
     if (released) {
@@ -65,16 +80,67 @@ function attemptBackend(
     released = true;
     releaseBackend(backend);
 
-    console.log(
-      `${backend.name} active connections: ${backend.activeConnections}`,
-    );
+    log("INFO", "Backend connection released", {
+      requestId: context.id,
+      backend: backend.name,
+      activeConnections: backend.activeConnections,
+    });
+  };
+
+  const recordFailure = () => {
+    if (failureRecorded) {
+      return;
+    }
+
+    failureRecorded = true;
+
+    recordBackendFailure(backend.name);
+    circuit.recordFailure();
+  };
+
+  const completeRequest = (success: boolean) => {
+    if (requestCompleted) {
+      return;
+    }
+
+    requestCompleted = true;
+
+    const durationMs = Date.now() - context.startedAt;
+
+    if (success) {
+      recordRequestSuccess(durationMs);
+    } else {
+      recordRequestFailure(durationMs);
+    }
+
+    log(success ? "INFO" : "ERROR", "Request completed", {
+      requestId: context.id,
+      durationMs,
+      success,
+    });
+  };
+
+  const failRequest = () => {
+    releaseConnection();
+    completeRequest(false);
+    sendBadGateway(clientSocket);
   };
 
   const retry = () => {
     releaseConnection();
 
+    /*
+     * Once response data has been sent to the client,
+     * retrying the request could corrupt the response.
+     */
+    if (responseStarted) {
+      completeRequest(false);
+      clientSocket.destroy();
+      return;
+    }
+
     if (retryCount >= PROXY_CONFIG.maxRetries) {
-      sendBadGateway(clientSocket);
+      failRequest();
       return;
     }
 
@@ -84,11 +150,15 @@ function attemptBackend(
     );
 
     if (!retryBackend) {
-      sendBadGateway(clientSocket);
+      failRequest();
       return;
     }
 
-    console.log(`Retrying request with ${retryBackend.name}`);
+    log("WARN", "Retrying request", {
+      requestId: context.id,
+      backend: retryBackend.name,
+      retryCount: retryCount + 1,
+    });
 
     attemptBackend(
       clientSocket,
@@ -97,6 +167,7 @@ function attemptBackend(
       backends,
       attemptedBackends,
       retryCount + 1,
+      context,
     );
   };
 
@@ -106,7 +177,10 @@ function attemptBackend(
       port: backend.port,
     },
     () => {
-      console.log(`Connected to ${backend.name}`);
+      log("INFO", "Connected to backend", {
+        requestId: context.id,
+        backend: backend.name,
+      });
 
       backendSocket.write(data);
     },
@@ -116,6 +190,7 @@ function attemptBackend(
 
   backendSocket.on("data", (data) => {
     responseStarted = true;
+
     circuit.recordSuccess();
 
     clientSocket.write(data);
@@ -128,22 +203,33 @@ function attemptBackend(
     }
 
     releaseConnection();
+    completeRequest(true);
+
     clientSocket.end();
   });
 
   backendSocket.on("timeout", () => {
-    console.error(`${backend.name} connection timeout`);
+    log("ERROR", "Backend socket timeout", {
+      requestId: context.id,
+      backend: backend.name,
+    });
 
     recordFailure();
+
     backendSocket.destroy();
 
     retry();
   });
 
   backendSocket.on("error", (error) => {
-    console.error(`${backend.name} socket error:`, error);
+    log("ERROR", "Backend socket error", {
+      requestId: context.id,
+      backend: backend.name,
+      error: error.message,
+    });
 
     recordFailure();
+
     retry();
   });
 }

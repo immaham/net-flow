@@ -28,6 +28,11 @@ export function checkBackendHealth(backend: Backend): Promise<boolean> {
     socket.on("end", () => {
       const statusLine = response.split("\r\n")[0];
 
+      if (!statusLine) {
+        resolve(false);
+        return;
+      }
+
       resolve(statusLine.includes("200"));
     });
 

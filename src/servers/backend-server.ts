@@ -10,7 +10,9 @@ const server = net.createServer((socket) => {
     const request = data.toString();
 
     const requestLine = request.split("\r\n")[0];
-
+    if (!requestLine) {
+      return;
+    }
     const [method, path] = requestLine.split(" ");
 
     console.log(`${INSTANCE_NAME} received:`);

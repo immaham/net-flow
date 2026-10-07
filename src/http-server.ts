@@ -13,7 +13,9 @@ const server = net.createServer((socket) => {
     const lines = request.split("\r\n");
 
     const requestLine = lines[0];
-
+    if (!requestLine) {
+      return;
+    }
     const [method, path, version] = requestLine.split(" ");
 
     const headers: Record<string, string> = {};
@@ -27,6 +29,9 @@ const server = net.createServer((socket) => {
 
       const value = valueParts.join(":").trim();
 
+      if (!key) {
+        continue;
+      }
       headers[key.toLowerCase()] = value;
     }
 
