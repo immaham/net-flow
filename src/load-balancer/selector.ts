@@ -11,8 +11,17 @@ export function selectBackend(
   backends: Backend[],
   strategy: LoadBalancingStrategy,
   isAvailable: (backend: Backend) => boolean,
+  getCircuitState: (backend: Backend) => string,
 ): Backend | undefined {
   const availableBackends = backends.filter(isAvailable);
+
+  const halfOpenBackend = availableBackends.find(
+    (backend) => getCircuitState(backend) === "HALF_OPEN",
+  );
+
+  if (halfOpenBackend) {
+    return halfOpenBackend;
+  }
 
   if (strategy === "round-robin") {
     return getNextBackend(availableBackends);

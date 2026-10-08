@@ -7,7 +7,10 @@ import {
   sendServiceUnavailable,
 } from "../health/health-checker.js";
 import { proxyToBackend } from "../proxy/proxy.js";
-import { isBackendAvailable } from "../circuit-breaker/registry.js";
+import {
+  isBackendAvailable,
+  getCircuitState,
+} from "../circuit-breaker/registry.js";
 import { createRequestContext } from "../observability/request-context.js";
 import { log } from "../observability/logger.js";
 import { getMetrics, recordRequestStart } from "../observability/metrics.js";
@@ -51,7 +54,12 @@ const server = net.createServer((clientSocket) => {
       requestId: context.id,
     });
 
-    const backend = selectBackend(backends, strategy, isBackendAvailable);
+    const backend = selectBackend(
+      backends,
+      strategy,
+      isBackendAvailable,
+      getCircuitState,
+    );
 
     if (!backend) {
       console.error("No healthy backends available");

@@ -1,5 +1,7 @@
 import type { Backend } from "../load-balancer/types.js";
+
 import { CircuitBreaker } from "./circuit-breaker.js";
+
 import { recordCircuitState } from "../observability/metrics.js";
 
 const circuits = new Map<string, CircuitBreaker>();
@@ -9,10 +11,15 @@ export function getCircuitBreaker(backend: Backend): CircuitBreaker {
 
   if (!circuit) {
     circuit = new CircuitBreaker();
+
     circuits.set(backend.name, circuit);
   }
 
   return circuit;
+}
+
+export function getCircuitState(backend: Backend) {
+  return getCircuitBreaker(backend).getState();
 }
 
 export function isBackendAvailable(backend: Backend): boolean {
@@ -23,7 +30,9 @@ export function isBackendAvailable(backend: Backend): boolean {
   const circuit = getCircuitBreaker(backend);
 
   const available = circuit.canRequest();
+
   recordCircuitState(backend.name, circuit.getState());
+
   console.log(
     `${backend.name} circuit: ${circuit.getState()} available: ${available}`,
   );

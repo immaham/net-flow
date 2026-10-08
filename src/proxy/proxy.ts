@@ -1,15 +1,22 @@
 import net from "node:net";
 
 import type { Backend } from "../load-balancer/index.js";
+
 import {
   acquireBackend,
   releaseBackend,
 } from "../load-balancer/connection-tracker.js";
+
 import { PROXY_CONFIG } from "../config/proxy.js";
+
 import { sendBadGateway } from "./proxy-errors.js";
+
 import { getCircuitBreaker } from "../circuit-breaker/registry.js";
+
 import type { RequestContext } from "../observability/request-context.js";
+
 import { log } from "../observability/logger.js";
+
 import {
   recordBackendRequest,
   recordBackendFailure,
@@ -78,6 +85,7 @@ function attemptBackend(
     }
 
     released = true;
+
     releaseBackend(backend);
 
     log("INFO", "Backend connection released", {
@@ -198,6 +206,7 @@ function attemptBackend(
 
   backendSocket.on("end", () => {
     if (!responseStarted) {
+      recordFailure();
       retry();
       return;
     }
@@ -217,7 +226,6 @@ function attemptBackend(
     recordFailure();
 
     backendSocket.destroy();
-
     retry();
   });
 
@@ -229,7 +237,6 @@ function attemptBackend(
     });
 
     recordFailure();
-
     retry();
   });
 }
