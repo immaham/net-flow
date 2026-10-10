@@ -14,6 +14,7 @@ import {
 import { createRequestContext } from "../observability/request-context.js";
 import { log } from "../observability/logger.js";
 import { getMetrics, recordRequestStart } from "../observability/metrics.js";
+import { proxyWebSocket } from "../proxy/websocket-proxy.js";
 
 runHealthChecks(backends);
 
@@ -30,6 +31,15 @@ const server = net.createServer((clientSocket) => {
     const requestData = Buffer.isBuffer(data) ? data : Buffer.from(data);
 
     const requestText = requestData.toString();
+
+    if (
+      /^GET\s+/i.test(requestText) &&
+      /\bupgrade:\s*websocket\b/i.test(requestText) &&
+      /\bconnection:[^\r\n]*\bupgrade\b/i.test(requestText)
+    ) {
+      proxyWebSocket(clientSocket, requestData);
+      return;
+    }
 
     if (requestText.startsWith("GET /metrics")) {
       const metrics = getMetrics();
