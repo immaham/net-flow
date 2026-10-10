@@ -14,6 +14,8 @@
     "dev:websocket": "tsx src/servers/websocket-backend-server.ts",
     "test:websocket": "tsx src/servers/websocket-test-client.ts",
     "dev:proxy": "tsx src/servers/proxy-server.ts",
+    "test:redis": "tsx src/redis/redis-test.ts",
+    "test:rate-limit": "tsx src/redis/rate-limiter-test.ts",
     "start": "tsx src/tcp-server.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -28,5 +30,8 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "ws": "^8.22.0"
+  },
+  "dependencies": {
+    "redis": "^6.3.0"
   }
 }
