@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 
 export async function GET() {
+  const proxyUrl = process.env.PROXY_URL ?? "http://localhost:9000";
+
   try {
-    const response = await fetch("http://localhost:9000/metrics", {
+    const response = await fetch(`${proxyUrl}/metrics`, {
       cache: "no-store",
       signal: AbortSignal.timeout(3000),
     });

@@ -20,6 +20,13 @@ const server = net.createServer((socket) => {
 
     const [method, path] = requestLine.split(" ");
 
+    if (!method || !path) {
+      socket.end(
+        "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+      );
+      return;
+    }
+
     const url = new URL(path, `http://${INSTANCE_NAME}`);
 
     if (method === "GET" && url.pathname === "/faults") {
@@ -102,6 +109,6 @@ const server = net.createServer((socket) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`${INSTANCE_NAME} listening on port ${PORT}`);
 });

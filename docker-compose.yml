@@ -1,0 +1,66 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: net-flow:latest
+    command: ["npm", "run", "dev:backend-all"]
+    environment:
+      PORT: 9101
+    expose:
+      - "9101"
+      - "9102"
+      - "9103"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const net = require('node:net'); const s = net.connect(9101, '127.0.0.1', () => { s.write('GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n'); }); let d = ''; s.on('data', c => d += c); s.on('end', () => process.exit(d.includes('200 OK') ? 0 : 1)); s.on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 3000);"
+      interval: 10s
+      timeout: 4s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  proxy:
+    image: net-flow:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["npm", "run", "dev:proxy"]
+    environment:
+      BACKEND_HOST: backend
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "9000:9000"
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    environment:
+      PROXY_URL: http://proxy:9000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - proxy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
