@@ -95,6 +95,21 @@ function attemptBackend(
     });
   };
 
+  const handleClientClose = () => {
+    if (requestCompleted) {
+      return;
+    }
+
+    log("WARN", "Client disconnected before request completed", {
+      requestId: context.id,
+      backend: backend.name,
+    });
+
+    backendSocket.destroy();
+    releaseConnection();
+    completeRequest(false);
+  };
+
   const recordFailure = () => {
     if (failureRecorded) {
       return;
@@ -107,12 +122,21 @@ function attemptBackend(
   };
 
   const completeRequest = (success: boolean) => {
+    clientSocket.off("close", handleClientClose);
     if (requestCompleted) {
       return;
     }
 
     requestCompleted = true;
-
+    log("INFO", "Completing request", {
+      requestId: context.id,
+      success,
+      responseStarted,
+      clientDestroyed: clientSocket.destroyed,
+      clientWritableEnded: clientSocket.writableEnded,
+      backend: backend.name,
+      retryCount,
+    });
     const durationMs = Date.now() - context.startedAt;
 
     if (success) {
@@ -195,11 +219,18 @@ function attemptBackend(
   );
 
   backendSocket.setTimeout(PROXY_CONFIG.backendSocketTimeout);
-
+  clientSocket.once("close", handleClientClose);
   backendSocket.on("data", (data) => {
     responseStarted = true;
 
     circuit.recordSuccess();
+
+    if (clientSocket.destroyed || clientSocket.writableEnded) {
+      backendSocket.destroy();
+      releaseConnection();
+      completeRequest(false);
+      return;
+    }
 
     clientSocket.write(data);
   });
