@@ -41,6 +41,8 @@ services:
     environment:
       BACKEND_HOST: backend
       REDIS_URL: redis://redis:6379
+      RATE_LIMIT: 100000
+      RATE_LIMIT_WINDOW_SECONDS: 60
     ports:
       - "9000:9000"
     depends_on:

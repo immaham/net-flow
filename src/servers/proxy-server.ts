@@ -56,6 +56,7 @@ const server = net.createServer((clientSocket) => {
         `\r\n` +
         body;
 
+      clientSocket.off("data", handleClientData);
       clientSocket.end(response);
       return;
     }

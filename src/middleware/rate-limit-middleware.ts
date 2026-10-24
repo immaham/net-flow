@@ -1,8 +1,8 @@
 import type net from "node:net";
 import { checkRateLimit } from "../redis/rate-limiter.js";
 
-const RATE_LIMIT = 5;
-const WINDOW_SECONDS = 60;
+const RATE_LIMIT = Number(process.env.RATE_LIMIT ?? 5);
+const WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS ?? 60);
 
 export async function applyRateLimit(
   clientSocket: net.Socket,
