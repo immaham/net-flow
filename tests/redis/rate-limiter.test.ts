@@ -42,4 +42,54 @@ describe("Rate Limiter integration", () => {
     assert.equal(result.remaining, 0);
     assert.ok(result.retryAfterSeconds > 0);
   });
+  it("allows requests again after the rate-limit window expires", async () => {
+    const expiryKey = `${key}:expiry`;
+    await redisClient.del(expiryKey);
+
+    try {
+      const options = {
+        limit: 1,
+        windowSeconds: 2,
+      };
+
+      const firstRequest = await checkRateLimit(expiryKey, options);
+
+      assert.equal(firstRequest.allowed, true);
+      assert.equal(firstRequest.remaining, 0);
+      assert.ok(firstRequest.retryAfterSeconds > 0);
+
+      const blockedRequest = await checkRateLimit(expiryKey, options);
+
+      assert.equal(blockedRequest.allowed, false);
+      assert.equal(blockedRequest.remaining, 0);
+
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+
+      const requestAfterExpiry = await checkRateLimit(expiryKey, options);
+
+      assert.equal(requestAfterExpiry.allowed, true);
+      assert.equal(requestAfterExpiry.remaining, 0);
+      assert.ok(requestAfterExpiry.retryAfterSeconds > 0);
+    } finally {
+      await redisClient.del(expiryKey);
+    }
+  });
+  it("enforces the limit for concurrent requests", async () => {
+    const concurrentKey = `${key}:concurrent`;
+
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 10 }, () =>
+          checkRateLimit(concurrentKey, {
+            limit: 3,
+            windowSeconds: 60,
+          }),
+        ),
+      );
+
+      assert.equal(results.filter((result) => result.allowed).length, 3);
+    } finally {
+      await redisClient.del(concurrentKey);
+    }
+  });
 });
