@@ -163,6 +163,68 @@ describe("Proxy integration", () => {
     }
   });
 
+  it("adds rate-limit headers when backend response headers arrive in chunks", async () => {
+    const backendServer = net.createServer((socket) => {
+      socket.on("data", () => {
+        socket.write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n");
+        setTimeout(() => {
+          socket.end("\r\nOK");
+        }, 10);
+      });
+    });
+
+    const backendPort = await listen(backendServer);
+    const backend = createBackend(backendPort, "chunked-headers-backend");
+
+    const clientServer = net.createServer((clientSocket) => {
+      proxyToBackend({
+        clientSocket,
+        backend,
+        data: Buffer.from(
+          "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        ),
+        backends: [backend],
+        context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
+      });
+    });
+
+    const proxyPort = await listen(clientServer);
+
+    try {
+      const response = await new Promise<string>((resolve, reject) => {
+        const socket = net.createConnection(
+          { host: "127.0.0.1", port: proxyPort },
+          () => {
+            socket.write(
+              "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+          },
+        );
+
+        const chunks: Buffer[] = [];
+
+        socket.on("data", (chunk) => chunks.push(chunk));
+        socket.on("end", () => resolve(Buffer.concat(chunks).toString()));
+        socket.on("error", reject);
+      });
+
+      assert.match(response, /200 OK/);
+      assert.match(response, /\r\nX-RateLimit-Limit: 100\r\n/i);
+      assert.match(response, /\r\nX-RateLimit-Remaining: 99\r\n/i);
+      assert.match(response, /\r\n\r\nOK$/);
+      assert.equal(backend.activeConnections, 0);
+    } finally {
+      clientServer.close();
+      backendServer.close();
+    }
+  });
+
   it("releases the backend connection when the client disconnects", async () => {
     let backendConnectedResolve!: () => void;
     const backendConnected = new Promise<void>((resolve) => {
