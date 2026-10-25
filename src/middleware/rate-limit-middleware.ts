@@ -4,9 +4,16 @@ import { checkRateLimit } from "../redis/rate-limiter.js";
 const RATE_LIMIT = Number(process.env.RATE_LIMIT ?? 5);
 const WINDOW_SECONDS = Number(process.env.RATE_LIMIT_WINDOW_SECONDS ?? 60);
 
+export interface RateLimitInfo {
+  allowed: boolean;
+  limit: number;
+  remaining: number;
+  retryAfterSeconds: number;
+}
+
 export async function applyRateLimit(
   clientSocket: net.Socket,
-): Promise<boolean> {
+): Promise<RateLimitInfo> {
   const clientIp = clientSocket.remoteAddress ?? "unknown";
   const key = `rate-limit:${clientIp}`;
 
@@ -15,24 +22,24 @@ export async function applyRateLimit(
     windowSeconds: WINDOW_SECONDS,
   });
 
-  if (result.allowed) {
-    return true;
+  if (!result.allowed) {
+    const body = JSON.stringify({
+      error: "Too Many Requests",
+      retryAfterSeconds: result.retryAfterSeconds,
+    });
+
+    clientSocket.end(
+      `HTTP/1.1 429 Too Many Requests\r\n` +
+        `Content-Type: application/json\r\n` +
+        `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+        `X-RateLimit-Limit: ${result.limit}\r\n` +
+        `X-RateLimit-Remaining: ${result.remaining}\r\n` +
+        `Retry-After: ${result.retryAfterSeconds}\r\n` +
+        `Connection: close\r\n` +
+        `\r\n` +
+        body,
+    );
   }
 
-  const body = JSON.stringify({
-    error: "Too Many Requests",
-    retryAfterSeconds: result.retryAfterSeconds,
-  });
-
-  clientSocket.end(
-    `HTTP/1.1 429 Too Many Requests\r\n` +
-      `Content-Type: application/json\r\n` +
-      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
-      `Retry-After: ${result.retryAfterSeconds}\r\n` +
-      `Connection: close\r\n` +
-      `\r\n` +
-      body,
-  );
-
-  return false;
+  return result;
 }

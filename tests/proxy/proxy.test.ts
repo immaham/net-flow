@@ -64,6 +64,12 @@ it("retries with the next backend when the first backend is unavailable", async 
       ),
       backends: [unavailableBackend, healthyBackend],
       context: createRequestContext(),
+      rateLimitInfo: {
+        allowed: true,
+        limit: 100,
+        remaining: 99,
+        retryAfterSeconds: 60,
+      },
     });
   });
 
@@ -88,6 +94,8 @@ it("retries with the next backend when the first backend is unavailable", async 
     });
 
     assert.match(response, /200 OK/);
+    assert.match(response, /\r\nX-RateLimit-Limit: 100\r\n/i);
+    assert.match(response, /\r\nX-RateLimit-Remaining: 99\r\n/i);
     assert.match(response, /\r\n\r\nOK$/);
     assert.equal(unavailableBackend.activeConnections, 0);
     assert.equal(healthyBackend.activeConnections, 0);
@@ -117,6 +125,12 @@ describe("Proxy integration", () => {
         ),
         backends: [backend],
         context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
       });
     });
 
@@ -171,6 +185,12 @@ describe("Proxy integration", () => {
           data: requestData,
           backends: [backend],
           context: createRequestContext(),
+          rateLimitInfo: {
+            allowed: true,
+            limit: 100,
+            remaining: 99,
+            retryAfterSeconds: 60,
+          },
         });
       });
     });
@@ -229,6 +249,12 @@ describe("Proxy integration", () => {
         ),
         backends: [unavailableBackend],
         context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
       });
     });
 
@@ -277,6 +303,12 @@ describe("Proxy integration", () => {
         ),
         backends: [silentBackend],
         context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
       });
     });
 

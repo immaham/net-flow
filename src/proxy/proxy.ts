@@ -1,22 +1,15 @@
 import net from "node:net";
-
 import type { Backend } from "../load-balancer/index.js";
-
 import {
   acquireBackend,
   releaseBackend,
 } from "../load-balancer/connection-tracker.js";
-
 import { PROXY_CONFIG } from "../config/proxy.js";
-
 import { sendBadGateway } from "./proxy-errors.js";
-
 import { getCircuitBreaker } from "../circuit-breaker/registry.js";
-
 import type { RequestContext } from "../observability/request-context.js";
-
 import { log } from "../observability/logger.js";
-
+import type { RateLimitInfo } from "../middleware/rate-limit-middleware.js";
 import {
   recordBackendRequest,
   recordBackendFailure,
@@ -30,6 +23,7 @@ export type ProxyRequestOptions = {
   data: Buffer;
   backends: Backend[];
   context: RequestContext;
+  rateLimitInfo: RateLimitInfo;
 };
 
 export function proxyToBackend({
@@ -38,6 +32,7 @@ export function proxyToBackend({
   data,
   backends,
   context,
+  rateLimitInfo,
 }: ProxyRequestOptions) {
   const attemptedBackends = new Set<string>();
 
@@ -49,6 +44,7 @@ export function proxyToBackend({
     attemptedBackends,
     0,
     context,
+    rateLimitInfo,
   );
 }
 
@@ -60,6 +56,7 @@ function attemptBackend(
   attemptedBackends: Set<string>,
   retryCount: number,
   context: RequestContext,
+  rateLimitInfo: RateLimitInfo,
 ) {
   attemptedBackends.add(backend.name);
 
@@ -78,6 +75,8 @@ function attemptBackend(
   let responseStarted = false;
   let failureRecorded = false;
   let requestCompleted = false;
+  let responseHeadersProcessed = false;
+  let pendingResponse = Buffer.alloc(0);
 
   const releaseConnection = () => {
     if (released) {
@@ -200,6 +199,7 @@ function attemptBackend(
       attemptedBackends,
       retryCount + 1,
       context,
+      rateLimitInfo,
     );
   };
 
@@ -232,7 +232,35 @@ function attemptBackend(
       return;
     }
 
-    clientSocket.write(data);
+    if (responseHeadersProcessed) {
+      clientSocket.write(data);
+      return;
+    }
+
+    const responseChunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+
+    pendingResponse = Buffer.concat([pendingResponse, responseChunk]);
+    const headerEnd = pendingResponse.indexOf("\r\n\r\n");
+
+    if (headerEnd === -1) {
+      return;
+    }
+
+    const headers = pendingResponse.subarray(0, headerEnd).toString("latin1");
+
+    const body = pendingResponse.subarray(headerEnd + 4);
+
+    const updatedHeaders =
+      `${headers}\r\n` +
+      `X-RateLimit-Limit: ${rateLimitInfo.limit}\r\n` +
+      `X-RateLimit-Remaining: ${rateLimitInfo.remaining}`;
+
+    clientSocket.write(
+      Buffer.concat([Buffer.from(`${updatedHeaders}\r\n\r\n`, "latin1"), body]),
+    );
+
+    responseHeadersProcessed = true;
+    pendingResponse = Buffer.alloc(0);
   });
 
   backendSocket.on("end", () => {

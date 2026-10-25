@@ -60,12 +60,12 @@ const server = net.createServer((clientSocket) => {
       clientSocket.end(response);
       return;
     }
-
     // Apply rate limiting to regular HTTP requests.
+    let rateLimitInfo: Awaited<ReturnType<typeof applyRateLimit>> | undefined;
     try {
-      const allowed = await applyRateLimit(clientSocket);
+      rateLimitInfo = await applyRateLimit(clientSocket);
 
-      if (!allowed) {
+      if (!rateLimitInfo.allowed) {
         return;
       }
     } catch (error) {
@@ -87,6 +87,9 @@ const server = net.createServer((clientSocket) => {
         );
       }
 
+      return;
+    }
+    if (!rateLimitInfo) {
       return;
     }
 
@@ -117,6 +120,7 @@ const server = net.createServer((clientSocket) => {
       data: requestData,
       backends,
       context,
+      rateLimitInfo,
     });
   };
 
