@@ -76,6 +76,7 @@ function attemptBackend(
   let failureRecorded = false;
   let requestCompleted = false;
   let responseHeadersProcessed = false;
+  let protocolUpgraded = false;
   let pendingResponse = Buffer.alloc(0);
 
   const releaseConnection = () => {
@@ -96,6 +97,13 @@ function attemptBackend(
 
   const handleClientClose = () => {
     if (requestCompleted) {
+      return;
+    }
+
+    if (protocolUpgraded) {
+      backendSocket.destroy();
+      releaseConnection();
+      completeRequest(true);
       return;
     }
 
@@ -247,23 +255,55 @@ function attemptBackend(
     }
 
     const headers = pendingResponse.subarray(0, headerEnd).toString("latin1");
-
     const body = pendingResponse.subarray(headerEnd + 4);
 
-    const updatedHeaders =
-      `${headers}\r\n` +
-      `X-RateLimit-Limit: ${rateLimitInfo.limit}\r\n` +
-      `X-RateLimit-Remaining: ${rateLimitInfo.remaining}`;
-
-    clientSocket.write(
-      Buffer.concat([Buffer.from(`${updatedHeaders}\r\n\r\n`, "latin1"), body]),
+    const statusLine = headers.split("\r\n", 1)[0] ?? "";
+    const isProtocolUpgrade = /^HTTP\/\d(?:\.\d)?\s+101(?:\s|$)/i.test(
+      statusLine,
     );
+
+    if (isProtocolUpgrade) {
+      // Switch from HTTP proxying to a bidirectional tunnel.
+      protocolUpgraded = true;
+
+      // Disable the regular backend response timeout for the tunnel.
+      backendSocket.setTimeout(0);
+
+      // Forward client data (e.g. WebSocket frames) to the backend.
+      clientSocket.on("data", (chunk) => {
+        if (!backendSocket.destroyed && backendSocket.writable) {
+          backendSocket.write(chunk);
+        }
+      });
+
+      // Do not modify protocol-upgrade responses.
+      clientSocket.write(pendingResponse);
+    } else {
+      const updatedHeaders =
+        `${headers}\r\n` +
+        `X-RateLimit-Limit: ${rateLimitInfo.limit}\r\n` +
+        `X-RateLimit-Remaining: ${rateLimitInfo.remaining}`;
+
+      clientSocket.write(
+        Buffer.concat([
+          Buffer.from(`${updatedHeaders}\r\n\r\n`, "latin1"),
+          body,
+        ]),
+      );
+    }
 
     responseHeadersProcessed = true;
     pendingResponse = Buffer.alloc(0);
   });
 
   backendSocket.on("end", () => {
+    if (protocolUpgraded) {
+      releaseConnection();
+      completeRequest(true);
+      clientSocket.end();
+      return;
+    }
+
     if (!responseStarted) {
       recordFailure();
       retry();
@@ -277,6 +317,13 @@ function attemptBackend(
   });
 
   backendSocket.on("timeout", () => {
+    if (protocolUpgraded) {
+      backendSocket.destroy();
+      releaseConnection();
+      completeRequest(false);
+      clientSocket.destroy();
+      return;
+    }
     log("ERROR", "Backend socket timeout", {
       requestId: context.id,
       backend: backend.name,
@@ -289,6 +336,13 @@ function attemptBackend(
   });
 
   backendSocket.on("error", (error) => {
+    if (protocolUpgraded) {
+      backendSocket.destroy();
+      releaseConnection();
+      completeRequest(false);
+      clientSocket.destroy();
+      return;
+    }
     log("ERROR", "Backend socket error", {
       requestId: context.id,
       backend: backend.name,

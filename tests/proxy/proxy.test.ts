@@ -106,6 +106,245 @@ it("retries with the next backend when the first backend is unavailable", async 
 });
 
 describe("Proxy integration", () => {
+  it("does not modify HTTP 101 protocol-upgrade responses", async () => {
+    const upgradeResponse =
+      "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      "\r\n";
+
+    const backendSockets = new Set<net.Socket>();
+    const backendServer = net.createServer((socket) => {
+      backendSockets.add(socket);
+      socket.on("error", () => {});
+      socket.on("close", () => backendSockets.delete(socket));
+
+      socket.on("data", () => {
+        socket.write(upgradeResponse);
+        // Keep the connection open, as an upgraded connection would.
+      });
+    });
+
+    const backendPort = await listen(backendServer);
+    const backend = createBackend(backendPort, "upgrade-backend");
+
+    const proxySockets = new Set<net.Socket>();
+    const clientServer = net.createServer((clientSocket) => {
+      proxySockets.add(clientSocket);
+      clientSocket.on("close", () => proxySockets.delete(clientSocket));
+      proxyToBackend({
+        clientSocket,
+        backend,
+        data: Buffer.from(
+          "GET / HTTP/1.1\r\n" +
+            "Host: localhost\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Upgrade: websocket\r\n\r\n",
+        ),
+        backends: [backend],
+        context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
+      });
+    });
+
+    const proxyPort = await listen(clientServer);
+
+    try {
+      const response = await new Promise<string>((resolve, reject) => {
+        const socket = net.createConnection(
+          { host: "127.0.0.1", port: proxyPort },
+          () => {
+            socket.write(
+              "GET / HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Upgrade: websocket\r\n\r\n",
+            );
+          },
+        );
+
+        const chunks: Buffer[] = [];
+        let settled = false;
+
+        socket.on("data", (chunk) => {
+          chunks.push(chunk);
+
+          const received = Buffer.concat(chunks).toString("latin1");
+
+          if (received.includes("\r\n\r\n") && !settled) {
+            settled = true;
+            resolve(received);
+          }
+        });
+
+        socket.on("error", (error) => {
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+        });
+      });
+
+      assert.equal(response, upgradeResponse);
+      assert.doesNotMatch(response, /X-RateLimit-Limit/i);
+      assert.doesNotMatch(response, /X-RateLimit-Remaining/i);
+      assert.equal(backend.activeConnections, 1);
+    } finally {
+      for (const socket of proxySockets) {
+        socket.destroy();
+      }
+
+      for (const socket of backendSockets) {
+        socket.destroy();
+      }
+
+      await new Promise<void>((resolve) => {
+        clientServer.close(() => resolve());
+      });
+
+      await new Promise<void>((resolve) => {
+        backendServer.close(() => resolve());
+      });
+    }
+  });
+
+  it("forwards data bidirectionally after HTTP 101 upgrade", async () => {
+    const upgradeResponse =
+      "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      "\r\n";
+
+    const backendSockets = new Set<net.Socket>();
+    let receivedClientData = "";
+
+    const backendServer = net.createServer((socket) => {
+      backendSockets.add(socket);
+      socket.on("close", () => backendSockets.delete(socket));
+      socket.on("error", () => {});
+
+      socket.on("data", (chunk) => {
+        const message = chunk.toString();
+
+        if (message.startsWith("GET /")) {
+          socket.write(upgradeResponse);
+          return;
+        }
+
+        receivedClientData += message;
+        socket.write(`echo:${message}`);
+      });
+    });
+
+    const backendPort = await listen(backendServer);
+    const backend = createBackend(backendPort, "bidirectional-backend");
+
+    const proxySockets = new Set<net.Socket>();
+    const clientServer = net.createServer((clientSocket) => {
+      proxySockets.add(clientSocket);
+      clientSocket.on("close", () => proxySockets.delete(clientSocket));
+
+      proxyToBackend({
+        clientSocket,
+        backend,
+        data: Buffer.from(
+          "GET / HTTP/1.1\r\n" +
+            "Host: localhost\r\n" +
+            "Connection: Upgrade\r\n" +
+            "Upgrade: websocket\r\n\r\n",
+        ),
+        backends: [backend],
+        context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
+      });
+    });
+
+    const proxyPort = await listen(clientServer);
+    let testSocket: net.Socket | undefined;
+
+    try {
+      const response = await new Promise<string>((resolve, reject) => {
+        testSocket = net.createConnection(
+          { host: "127.0.0.1", port: proxyPort },
+          () => {
+            testSocket!.write(
+              "GET / HTTP/1.1\r\n" +
+                "Host: localhost\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Upgrade: websocket\r\n\r\n",
+            );
+          },
+        );
+
+        const socket = testSocket;
+        const chunks: Buffer[] = [];
+        let settled = false;
+
+        socket.on("data", (chunk) => {
+          chunks.push(chunk);
+
+          const received = Buffer.concat(chunks).toString("latin1");
+
+          if (received.includes("\r\n\r\n") && !settled) {
+            settled = true;
+            resolve(received);
+          }
+        });
+
+        socket.on("error", (error) => {
+          if (!settled) {
+            settled = true;
+            reject(error);
+          }
+        });
+      });
+
+      assert.equal(response, upgradeResponse);
+
+      const echoPromise = new Promise<string>((resolve, reject) => {
+        const socket = testSocket!;
+        let received = "";
+
+        const onData = (chunk: Buffer) => {
+          received += chunk.toString();
+
+          if (received.includes("echo:ping")) {
+            socket.off("data", onData);
+            resolve(received);
+          }
+        };
+
+        socket.on("data", onData);
+        socket.once("error", reject);
+        socket.write("ping");
+      });
+
+      assert.match(await echoPromise, /echo:ping/);
+      assert.equal(receivedClientData, "ping");
+      assert.equal(backend.activeConnections, 1);
+    } finally {
+      testSocket?.destroy();
+
+      for (const socket of proxySockets) socket.destroy();
+      for (const socket of backendSockets) socket.destroy();
+
+      await new Promise<void>((resolve) => clientServer.close(() => resolve()));
+      await new Promise<void>((resolve) =>
+        backendServer.close(() => resolve()),
+      );
+    }
+  });
+
   it("forwards a backend response to the client", async () => {
     const backendServer = net.createServer((socket) => {
       socket.on("data", () => {
