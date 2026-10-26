@@ -26,6 +26,20 @@ export type ProxyRequestOptions = {
   rateLimitInfo: RateLimitInfo;
 };
 
+export function writeWithBackpressure(
+  source: net.Socket,
+  destination: net.Socket,
+  chunk: Buffer,
+): boolean {
+  const canContinue = destination.write(chunk);
+
+  if (!canContinue) {
+    source.pause();
+  }
+
+  return canContinue;
+}
+
 export function proxyToBackend({
   clientSocket,
   backend,
@@ -128,13 +142,21 @@ function attemptBackend(
     circuit.recordFailure();
   };
 
+  const cleanupBackpressureListeners = () => {
+    backendSocket.off("drain", handleBackendDrain);
+    clientSocket.off("drain", handleClientDrain);
+  };
+
   const completeRequest = (success: boolean) => {
-    clientSocket.off("close", handleClientClose);
     if (requestCompleted) {
       return;
     }
 
     requestCompleted = true;
+
+    clientSocket.off("close", handleClientClose);
+    cleanupBackpressureListeners();
+
     log("INFO", "Completing request", {
       requestId: context.id,
       success,
@@ -144,6 +166,7 @@ function attemptBackend(
       backend: backend.name,
       retryCount,
     });
+
     const durationMs = Date.now() - context.startedAt;
 
     if (success) {
@@ -166,8 +189,9 @@ function attemptBackend(
   };
 
   const retry = () => {
+    cleanupBackpressureListeners();
+    clientSocket.off("close", handleClientClose);
     releaseConnection();
-
     /*
      * Once response data has been sent to the client,
      * retrying the request could corrupt the response.
@@ -211,20 +235,34 @@ function attemptBackend(
     );
   };
 
-  const backendSocket = net.createConnection(
-    {
-      host: backend.host,
-      port: backend.port,
-    },
-    () => {
-      log("INFO", "Connected to backend", {
-        requestId: context.id,
-        backend: backend.name,
-      });
+  const backendSocket = net.createConnection({
+    host: backend.host,
+    port: backend.port,
+  });
 
-      backendSocket.write(data);
-    },
-  );
+  const handleBackendDrain = () => {
+    if (!clientSocket.destroyed) {
+      clientSocket.resume();
+    }
+  };
+
+  const handleClientDrain = () => {
+    if (!backendSocket.destroyed) {
+      backendSocket.resume();
+    }
+  };
+
+  backendSocket.on("drain", handleBackendDrain);
+  clientSocket.on("drain", handleClientDrain);
+
+  backendSocket.on("connect", () => {
+    log("INFO", "Connected to backend", {
+      requestId: context.id,
+      backend: backend.name,
+    });
+
+    writeWithBackpressure(clientSocket, backendSocket, data);
+  });
 
   backendSocket.setTimeout(PROXY_CONFIG.backendSocketTimeout);
   clientSocket.once("close", handleClientClose);
@@ -241,7 +279,11 @@ function attemptBackend(
     }
 
     if (responseHeadersProcessed) {
-      clientSocket.write(data);
+      writeWithBackpressure(
+        backendSocket,
+        clientSocket,
+        Buffer.isBuffer(data) ? data : Buffer.from(data),
+      );
       return;
     }
 
@@ -272,19 +314,24 @@ function attemptBackend(
       // Forward client data (e.g. WebSocket frames) to the backend.
       clientSocket.on("data", (chunk) => {
         if (!backendSocket.destroyed && backendSocket.writable) {
-          backendSocket.write(chunk);
+          writeWithBackpressure(
+            clientSocket,
+            backendSocket,
+            Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk),
+          );
         }
       });
 
-      // Do not modify protocol-upgrade responses.
-      clientSocket.write(pendingResponse);
+      writeWithBackpressure(backendSocket, clientSocket, pendingResponse);
     } else {
       const updatedHeaders =
         `${headers}\r\n` +
         `X-RateLimit-Limit: ${rateLimitInfo.limit}\r\n` +
         `X-RateLimit-Remaining: ${rateLimitInfo.remaining}`;
 
-      clientSocket.write(
+      writeWithBackpressure(
+        backendSocket,
+        clientSocket,
         Buffer.concat([
           Buffer.from(`${updatedHeaders}\r\n\r\n`, "latin1"),
           body,

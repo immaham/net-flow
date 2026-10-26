@@ -3,7 +3,10 @@ import { once } from "node:events";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { proxyToBackend } from "../../src/proxy/proxy.js";
+import {
+  proxyToBackend,
+  writeWithBackpressure,
+} from "../../src/proxy/proxy.js";
 import type { Backend } from "../../src/load-balancer/types.js";
 import { createRequestContext } from "../../src/observability/request-context.js";
 
@@ -27,6 +30,58 @@ function createBackend(port: number, name: string): Backend {
     healthy: true,
   };
 }
+
+describe("writeWithBackpressure", () => {
+  it("pauses the source when destination.write returns false", () => {
+    let paused = false;
+
+    const source = {
+      pause() {
+        paused = true;
+      },
+    } as net.Socket;
+
+    const destination = {
+      write() {
+        return false;
+      },
+    } as net.Socket;
+
+    const result = writeWithBackpressure(
+      source,
+      destination,
+      Buffer.from("test"),
+    );
+
+    assert.equal(result, false);
+    assert.equal(paused, true);
+  });
+
+  it("does not pause the source when destination.write returns true", () => {
+    let paused = false;
+
+    const source = {
+      pause() {
+        paused = true;
+      },
+    } as net.Socket;
+
+    const destination = {
+      write() {
+        return true;
+      },
+    } as net.Socket;
+
+    const result = writeWithBackpressure(
+      source,
+      destination,
+      Buffer.from("test"),
+    );
+
+    assert.equal(result, true);
+    assert.equal(paused, false);
+  });
+});
 
 it("retries with the next backend when the first backend is unavailable", async () => {
   const backendServer = net.createServer((socket) => {
