@@ -71,6 +71,46 @@ export async function runHealthChecks(backends: Backend[]) {
   }
 }
 
+export function startHealthChecks(
+  backends: Backend[],
+  intervalMs: number = PROXY_CONFIG.healthCheckInterval,
+) {
+  let stopped = false;
+  let timer: NodeJS.Timeout | undefined;
+  let inFlight: Promise<void> | undefined;
+
+  const run = () => {
+    if (stopped) {
+      return;
+    }
+
+    inFlight = runHealthChecks(backends)
+      .catch((error) => {
+        console.error("Health check error:", error);
+      })
+      .finally(() => {
+        inFlight = undefined;
+
+        if (!stopped) {
+          timer = setTimeout(run, intervalMs);
+        }
+      });
+  };
+
+  run();
+
+  return async function stopHealthChecks() {
+    stopped = true;
+
+    if (timer) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+
+    await inFlight;
+  };
+}
+
 export function sendServiceUnavailable(socket: net.Socket) {
   const body = "No healthy backends available";
 

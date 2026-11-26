@@ -3,7 +3,7 @@ import net from "node:net";
 import { selectBackend } from "../load-balancer/index.js";
 import { backends, PORT, strategy } from "../config/backends.js";
 import {
-  runHealthChecks,
+  startHealthChecks,
   sendServiceUnavailable,
 } from "../health/health-checker.js";
 import { proxyToBackend } from "../proxy/proxy.js";
@@ -18,11 +18,7 @@ import { proxyWebSocket } from "../proxy/websocket-proxy.js";
 import { connectRedis } from "../redis/redis-client.js";
 import { applyRateLimit } from "../middleware/rate-limit-middleware.js";
 
-runHealthChecks(backends);
-
-setInterval(() => {
-  runHealthChecks(backends);
-}, 10000);
+const stopHealthChecks = startHealthChecks(backends);
 
 const server = net.createServer((clientSocket) => {
   console.log("Client connected to proxy");
