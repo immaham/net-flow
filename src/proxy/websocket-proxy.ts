@@ -1,10 +1,18 @@
 import net from "node:net";
+import type { SocketRegistry } from "../lifecycle/socket-registry.js";
 
-export function proxyWebSocket(clientSocket: net.Socket, initialData: Buffer) {
-  const backendSocket = net.createConnection({
+export function proxyWebSocket(
+  clientSocket: net.Socket,
+  initialData: Buffer,
+  backendSockets?: SocketRegistry,
+  target: net.TcpNetConnectOpts = {
     host: "127.0.0.1",
     port: 9201,
-  });
+  },
+) {
+  const backendSocket = net.createConnection(target);
+
+  backendSockets?.track(backendSocket);
 
   let handshakeComplete = false;
   let handshakeBuffer = Buffer.alloc(0);

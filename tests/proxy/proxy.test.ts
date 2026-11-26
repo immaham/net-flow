@@ -2,13 +2,14 @@ import net from "node:net";
 import { once } from "node:events";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-
 import {
   proxyToBackend,
   writeWithBackpressure,
 } from "../../src/proxy/proxy.js";
 import type { Backend } from "../../src/load-balancer/types.js";
 import { createRequestContext } from "../../src/observability/request-context.js";
+import { setTimeout as delay } from "node:timers/promises";
+import { SocketRegistry } from "../../src/lifecycle/socket-registry.js";
 
 async function listen(server: net.Server): Promise<number> {
   server.listen(0, "127.0.0.1");
@@ -29,6 +30,31 @@ function createBackend(port: number, name: string): Backend {
     activeConnections: 0,
     healthy: true,
   };
+}
+
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs = 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Condition was not met before timeout");
+    }
+
+    await delay(5);
+  }
+}
+
+class RecordingSocketRegistry extends SocketRegistry {
+  readonly trackedSockets = new Set<net.Socket>();
+
+  override track(socket: net.Socket): void {
+    super.track(socket);
+
+    this.trackedSockets.add(socket);
+  }
 }
 
 describe("writeWithBackpressure", () => {
@@ -84,6 +110,9 @@ describe("writeWithBackpressure", () => {
 });
 
 it("retries with the next backend when the first backend is unavailable", async () => {
+  const clientSockets = new SocketRegistry();
+  const backendSockets = new RecordingSocketRegistry();
+
   const backendServer = net.createServer((socket) => {
     socket.on("data", () => {
       socket.end(
@@ -111,20 +140,23 @@ it("retries with the next backend when the first backend is unavailable", async 
   const healthyBackend = createBackend(backendPort, "healthy-backend");
 
   const clientServer = net.createServer((clientSocket) => {
-    proxyToBackend({
-      clientSocket,
-      backend: unavailableBackend,
-      data: Buffer.from(
-        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-      ),
-      backends: [unavailableBackend, healthyBackend],
-      context: createRequestContext(),
-      rateLimitInfo: {
-        allowed: true,
-        limit: 100,
-        remaining: 99,
-        retryAfterSeconds: 60,
-      },
+    clientSockets.track(clientSocket);
+
+    clientSocket.once("data", (requestData) => {
+      proxyToBackend({
+        clientSocket,
+        backend: unavailableBackend,
+        data: requestData,
+        backends: [unavailableBackend, healthyBackend],
+        context: createRequestContext(),
+        rateLimitInfo: {
+          allowed: true,
+          limit: 100,
+          remaining: 99,
+          retryAfterSeconds: 60,
+        },
+        backendSockets,
+      });
     });
   });
 
@@ -154,9 +186,28 @@ it("retries with the next backend when the first backend is unavailable", async 
     assert.match(response, /\r\n\r\nOK$/);
     assert.equal(unavailableBackend.activeConnections, 0);
     assert.equal(healthyBackend.activeConnections, 0);
+    assert.equal(backendSockets.trackedSockets.size, 2);
+
+    await waitFor(() => clientSockets.size === 0 && backendSockets.size === 0);
+
+    assert.ok(
+      [...backendSockets.trackedSockets].every((socket) => socket.destroyed),
+    );
+
+    assert.equal(clientSockets.size, 0);
+    assert.equal(backendSockets.size, 0);
   } finally {
-    clientServer.close();
-    backendServer.close();
+    clientSockets.destroyAll();
+    backendSockets.destroyAll();
+
+    await Promise.all([
+      new Promise<void>((resolve) => {
+        clientServer.close(() => resolve());
+      }),
+      new Promise<void>((resolve) => {
+        backendServer.close(() => resolve());
+      }),
+    ]);
   }
 });
 
@@ -401,6 +452,9 @@ describe("Proxy integration", () => {
   });
 
   it("forwards a backend response to the client", async () => {
+    const clientSockets = new SocketRegistry();
+    const backendSockets = new SocketRegistry();
+
     const backendServer = net.createServer((socket) => {
       socket.on("data", () => {
         socket.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
@@ -411,31 +465,36 @@ describe("Proxy integration", () => {
     const backend = createBackend(backendPort, "healthy-backend");
 
     const clientServer = net.createServer((clientSocket) => {
-      proxyToBackend({
-        clientSocket,
-        backend,
-        data: Buffer.from(
-          "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        ),
-        backends: [backend],
-        context: createRequestContext(),
-        rateLimitInfo: {
-          allowed: true,
-          limit: 100,
-          remaining: 99,
-          retryAfterSeconds: 60,
-        },
+      clientSockets.track(clientSocket);
+
+      clientSocket.once("data", (requestData) => {
+        proxyToBackend({
+          clientSocket,
+          backend,
+          data: requestData,
+          backends: [backend],
+          context: createRequestContext(),
+          rateLimitInfo: {
+            allowed: true,
+            limit: 100,
+            remaining: 99,
+            retryAfterSeconds: 60,
+          },
+          backendSockets,
+        });
       });
     });
 
     const proxyPort = await listen(clientServer);
 
+    let testSocket: net.Socket | undefined;
+
     try {
       const response = await new Promise<string>((resolve, reject) => {
-        const socket = net.createConnection(
+        testSocket = net.createConnection(
           { host: "127.0.0.1", port: proxyPort },
           () => {
-            socket.write(
+            testSocket!.write(
               "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             );
           },
@@ -443,17 +502,41 @@ describe("Proxy integration", () => {
 
         const chunks: Buffer[] = [];
 
-        socket.on("data", (chunk) => chunks.push(chunk));
-        socket.on("end", () => resolve(Buffer.concat(chunks).toString()));
-        socket.on("error", reject);
+        testSocket.on("data", (chunk) => {
+          chunks.push(chunk);
+        });
+
+        testSocket.on("end", () => {
+          resolve(Buffer.concat(chunks).toString());
+        });
+
+        testSocket.on("error", reject);
       });
 
       assert.match(response, /200 OK/);
       assert.match(response, /\r\n\r\nOK$/);
       assert.equal(backend.activeConnections, 0);
+
+      await waitFor(
+        () => clientSockets.size === 0 && backendSockets.size === 0,
+      );
+
+      assert.equal(clientSockets.size, 0);
+      assert.equal(backendSockets.size, 0);
     } finally {
-      clientServer.close();
-      backendServer.close();
+      testSocket?.destroy();
+
+      clientSockets.destroyAll();
+      backendSockets.destroyAll();
+
+      await Promise.all([
+        new Promise<void>((resolve) => {
+          clientServer.close(() => resolve());
+        }),
+        new Promise<void>((resolve) => {
+          backendServer.close(() => resolve());
+        }),
+      ]);
     }
   });
 
@@ -520,6 +603,8 @@ describe("Proxy integration", () => {
   });
 
   it("releases the backend connection when the client disconnects", async () => {
+    const clientSockets = new SocketRegistry();
+    const backendSockets = new SocketRegistry();
     let backendConnectedResolve!: () => void;
     const backendConnected = new Promise<void>((resolve) => {
       backendConnectedResolve = resolve;
@@ -548,6 +633,8 @@ describe("Proxy integration", () => {
     const backend = createBackend(backendPort, "silent-backend");
 
     const clientServer = net.createServer((clientSocket) => {
+      clientSockets.track(clientSocket);
+
       clientSocket.once("data", (requestData) => {
         proxyToBackend({
           clientSocket,
@@ -561,6 +648,7 @@ describe("Proxy integration", () => {
             remaining: 99,
             retryAfterSeconds: 60,
           },
+          backendSockets,
         });
       });
     });
@@ -580,6 +668,11 @@ describe("Proxy integration", () => {
       );
 
       await backendConnected;
+
+      assert.equal(clientSockets.size, 1);
+      assert.equal(backendSockets.size, 1);
+      assert.equal(backend.activeConnections, 1);
+
       clientSocket.destroy();
 
       const backendCloseTimeout = new Promise<"timeout">((resolve) => {
@@ -599,7 +692,17 @@ describe("Proxy integration", () => {
 
       assert.ok(backendSocket?.destroyed);
       assert.equal(backend.activeConnections, 0);
+
+      await waitFor(
+        () => clientSockets.size === 0 && backendSockets.size === 0,
+      );
+
+      assert.equal(clientSockets.size, 0);
+      assert.equal(backendSockets.size, 0);
     } finally {
+      clientSockets.destroyAll();
+      backendSockets.destroyAll();
+
       backendSocket?.destroy();
 
       await Promise.all([
@@ -608,6 +711,132 @@ describe("Proxy integration", () => {
         }),
         new Promise<void>((resolve) => {
           silentBackendServer.close(() => resolve());
+        }),
+      ]);
+    }
+  });
+
+  it("destroys active proxy connections when forced cleanup is requested", async () => {
+    const clientSockets = new RecordingSocketRegistry();
+    const backendSockets = new RecordingSocketRegistry();
+    const backendPeerSockets = new SocketRegistry();
+
+    const backendServer = net.createServer((socket) => {
+      backendPeerSockets.track(socket);
+
+      socket.on("error", () => {});
+
+      // Keep the connection open without responding.
+      socket.resume();
+    });
+
+    const backendPort = await listen(backendServer);
+
+    const backend = createBackend(backendPort, "forced-cleanup-backend");
+
+    const clientServer = net.createServer((clientSocket) => {
+      clientSockets.track(clientSocket);
+
+      clientSocket.once("data", (requestData) => {
+        proxyToBackend({
+          clientSocket,
+          backend,
+          data: requestData,
+          backends: [backend],
+          context: createRequestContext(),
+          rateLimitInfo: {
+            allowed: true,
+            limit: 100,
+            remaining: 99,
+            retryAfterSeconds: 60,
+          },
+          backendSockets,
+        });
+      });
+    });
+
+    const proxyPort = await listen(clientServer);
+
+    let testSocket: net.Socket | undefined;
+
+    try {
+      testSocket = net.createConnection({
+        host: "127.0.0.1",
+        port: proxyPort,
+      });
+
+      testSocket.on("error", () => {});
+      testSocket.resume();
+
+      await once(testSocket, "connect");
+
+      testSocket.write(
+        "GET / HTTP/1.1\r\n" +
+          "Host: localhost\r\n" +
+          "Connection: close\r\n\r\n",
+      );
+
+      // Wait until the entire proxy connection is established.
+      await waitFor(
+        () =>
+          clientSockets.size === 1 &&
+          backendSockets.size === 1 &&
+          backendPeerSockets.size === 1 &&
+          backend.activeConnections === 1,
+      );
+
+      // Verify active connections before forced cleanup.
+      assert.equal(clientSockets.size, 1);
+      assert.equal(backendSockets.size, 1);
+      assert.equal(backendPeerSockets.size, 1);
+      assert.equal(backend.activeConnections, 1);
+      assert.equal(testSocket.destroyed, false);
+
+      // Simulate the forced socket cleanup phase of shutdown.
+      clientSockets.destroyAll();
+      backendSockets.destroyAll();
+
+      // Wait for all socket close events and logical cleanup.
+      await waitFor(
+        () =>
+          clientSockets.size === 0 &&
+          backendSockets.size === 0 &&
+          backendPeerSockets.size === 0 &&
+          backend.activeConnections === 0 &&
+          testSocket?.destroyed === true,
+      );
+
+      // Verify all resources have been released.
+      assert.equal(clientSockets.size, 0);
+      assert.equal(backendSockets.size, 0);
+      assert.equal(backendPeerSockets.size, 0);
+      assert.equal(backend.activeConnections, 0);
+
+      assert.equal(clientSockets.trackedSockets.size, 1);
+      assert.equal(backendSockets.trackedSockets.size, 1);
+
+      assert.ok(
+        [...clientSockets.trackedSockets].every((socket) => socket.destroyed),
+      );
+
+      assert.ok(
+        [...backendSockets.trackedSockets].every((socket) => socket.destroyed),
+      );
+
+      assert.equal(testSocket.destroyed, true);
+    } finally {
+      testSocket?.destroy();
+
+      clientSockets.destroyAll();
+      backendSockets.destroyAll();
+      backendPeerSockets.destroyAll();
+
+      await Promise.all([
+        new Promise<void>((resolve) => {
+          clientServer.close(() => resolve());
+        }),
+        new Promise<void>((resolve) => {
+          backendServer.close(() => resolve());
         }),
       ]);
     }
@@ -676,28 +905,35 @@ describe("Proxy integration", () => {
   });
 
   it("returns 502 when a backend accepts the connection but never responds", async () => {
-    const silentBackendServer = net.createServer(() => {
-      // Accept the connection but intentionally never respond.
+    const clientSockets = new SocketRegistry();
+    const backendSockets = new RecordingSocketRegistry();
+
+    const silentBackendServer = net.createServer((socket) => {
+      // Consume incoming data without sending a response.
+      socket.resume();
     });
 
     const backendPort = await listen(silentBackendServer);
     const silentBackend = createBackend(backendPort, "silent-backend");
 
     const clientServer = net.createServer((clientSocket) => {
-      proxyToBackend({
-        clientSocket,
-        backend: silentBackend,
-        data: Buffer.from(
-          "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-        ),
-        backends: [silentBackend],
-        context: createRequestContext(),
-        rateLimitInfo: {
-          allowed: true,
-          limit: 100,
-          remaining: 99,
-          retryAfterSeconds: 60,
-        },
+      clientSockets.track(clientSocket);
+
+      clientSocket.once("data", (requestData) => {
+        proxyToBackend({
+          clientSocket,
+          backend: silentBackend,
+          data: requestData,
+          backends: [silentBackend],
+          context: createRequestContext(),
+          rateLimitInfo: {
+            allowed: true,
+            limit: 100,
+            remaining: 99,
+            retryAfterSeconds: 60,
+          },
+          backendSockets,
+        });
       });
     });
 
@@ -724,9 +960,30 @@ describe("Proxy integration", () => {
       assert.match(response, /^HTTP\/1\.1 502 Bad Gateway/);
       assert.match(response, /\r\n\r\nBad Gateway$/);
       assert.equal(silentBackend.activeConnections, 0);
+      assert.equal(backendSockets.trackedSockets.size, 1);
+
+      await waitFor(
+        () => clientSockets.size === 0 && backendSockets.size === 0,
+      );
+
+      assert.ok(
+        [...backendSockets.trackedSockets].every((socket) => socket.destroyed),
+      );
+
+      assert.equal(clientSockets.size, 0);
+      assert.equal(backendSockets.size, 0);
     } finally {
-      clientServer.close();
-      silentBackendServer.close();
+      clientSockets.destroyAll();
+      backendSockets.destroyAll();
+
+      await Promise.all([
+        new Promise<void>((resolve) => {
+          clientServer.close(() => resolve());
+        }),
+        new Promise<void>((resolve) => {
+          silentBackendServer.close(() => resolve());
+        }),
+      ]);
     }
   });
 });

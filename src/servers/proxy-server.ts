@@ -17,10 +17,16 @@ import { getMetrics, recordRequestStart } from "../observability/metrics.js";
 import { proxyWebSocket } from "../proxy/websocket-proxy.js";
 import { connectRedis } from "../redis/redis-client.js";
 import { applyRateLimit } from "../middleware/rate-limit-middleware.js";
+import { SocketRegistry } from "../lifecycle/socket-registry.js";
 
 const stopHealthChecks = startHealthChecks(backends);
 
+const clientSockets = new SocketRegistry();
+const backendSockets = new SocketRegistry();
+
 const server = net.createServer((clientSocket) => {
+  clientSockets.track(clientSocket);
+
   console.log("Client connected to proxy");
 
   const handleClientData = async (data: Buffer) => {
@@ -35,7 +41,7 @@ const server = net.createServer((clientSocket) => {
       /\bconnection:[^\r\n]*\bupgrade\b/i.test(requestText)
     ) {
       clientSocket.off("data", handleClientData);
-      proxyWebSocket(clientSocket, requestData);
+      proxyWebSocket(clientSocket, requestData, backendSockets);
       return;
     }
 
@@ -117,6 +123,7 @@ const server = net.createServer((clientSocket) => {
       backends,
       context,
       rateLimitInfo,
+      backendSockets,
     });
   };
 

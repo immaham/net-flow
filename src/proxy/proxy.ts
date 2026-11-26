@@ -16,6 +16,7 @@ import {
   recordRequestSuccess,
   recordRequestFailure,
 } from "../observability/metrics.js";
+import type { SocketRegistry } from "../lifecycle/socket-registry.js";
 
 export type ProxyRequestOptions = {
   clientSocket: net.Socket;
@@ -24,6 +25,7 @@ export type ProxyRequestOptions = {
   backends: Backend[];
   context: RequestContext;
   rateLimitInfo: RateLimitInfo;
+  backendSockets?: SocketRegistry;
 };
 
 export function writeWithBackpressure(
@@ -47,6 +49,7 @@ export function proxyToBackend({
   backends,
   context,
   rateLimitInfo,
+  backendSockets,
 }: ProxyRequestOptions) {
   const attemptedBackends = new Set<string>();
 
@@ -59,6 +62,7 @@ export function proxyToBackend({
     0,
     context,
     rateLimitInfo,
+    backendSockets,
   );
 }
 
@@ -71,6 +75,7 @@ function attemptBackend(
   retryCount: number,
   context: RequestContext,
   rateLimitInfo: RateLimitInfo,
+  backendSockets?: SocketRegistry,
 ) {
   attemptedBackends.add(backend.name);
 
@@ -232,6 +237,7 @@ function attemptBackend(
       retryCount + 1,
       context,
       rateLimitInfo,
+      backendSockets,
     );
   };
 
@@ -239,6 +245,8 @@ function attemptBackend(
     host: backend.host,
     port: backend.port,
   });
+
+  backendSockets?.track(backendSocket);
 
   const handleBackendDrain = () => {
     if (!clientSocket.destroyed) {
