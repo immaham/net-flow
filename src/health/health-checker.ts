@@ -1,5 +1,6 @@
 import net from "node:net";
 import type { Backend } from "../load-balancer/index.js";
+import { PROXY_CONFIG } from "../config/proxy.js";
 
 export function checkBackendHealth(backend: Backend): Promise<boolean> {
   return new Promise((resolve) => {
@@ -20,6 +21,23 @@ export function checkBackendHealth(backend: Backend): Promise<boolean> {
     );
 
     let response = "";
+    let settled = false;
+
+    const complete = (healthy: boolean) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(healthy);
+    };
+
+    const timeout = setTimeout(() => {
+      complete(false);
+    }, PROXY_CONFIG.healthCheckTimeout);
 
     socket.on("data", (data) => {
       response += data.toString();
@@ -28,16 +46,17 @@ export function checkBackendHealth(backend: Backend): Promise<boolean> {
     socket.on("end", () => {
       const statusLine = response.split("\r\n")[0];
 
-      if (!statusLine) {
-        resolve(false);
-        return;
-      }
+      const healthy = /^HTTP\/1\.[01] 200(?:\s|$)/.test(statusLine ?? "");
 
-      resolve(statusLine.includes("200"));
+      complete(healthy);
     });
 
     socket.on("error", () => {
-      resolve(false);
+      complete(false);
+    });
+
+    socket.on("close", () => {
+      complete(false);
     });
   });
 }
