@@ -1,6 +1,10 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { connectRedis, redisClient } from "../../src/redis/redis-client.js";
+import {
+  connectRedis,
+  disconnectRedis,
+  redisClient,
+} from "../../src/redis/redis-client.js";
 import { checkRateLimit } from "../../src/redis/rate-limiter.js";
 
 describe("Rate Limiter integration", () => {
@@ -12,9 +16,10 @@ describe("Rate Limiter integration", () => {
   });
 
   after(async () => {
-    await redisClient.del(key);
-    if (redisClient.isOpen) {
-      await redisClient.quit();
+    try {
+      await redisClient.del(key);
+    } finally {
+      await disconnectRedis();
     }
   });
 

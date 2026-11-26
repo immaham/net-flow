@@ -17,4 +17,14 @@ export async function connectRedis() {
   console.log("Connected to Redis");
 }
 
+export async function disconnectRedis(): Promise<void> {
+  if (!redisClient.isOpen) {
+    return;
+  }
+
+  await redisClient.close();
+
+  console.log("Disconnected from Redis");
+}
+
 export { redisClient };
