@@ -524,10 +524,24 @@ describe("Proxy integration", () => {
     const backendConnected = new Promise<void>((resolve) => {
       backendConnectedResolve = resolve;
     });
+    let backendSocket: net.Socket | undefined;
 
-    const silentBackendServer = net.createServer(() => {
+    let backendClosedResolve!: () => void;
+    const backendClosed = new Promise<void>((resolve) => {
+      backendClosedResolve = resolve;
+    });
+
+    const silentBackendServer = net.createServer((socket) => {
+      backendSocket = socket;
+
+      socket.once("close", () => {
+        backendClosedResolve();
+      });
+
+      // Consume incoming data without sending a response.
+      socket.resume();
+
       backendConnectedResolve();
-      // Intentionally keep the backend connection open without responding.
     });
 
     const backendPort = await listen(silentBackendServer);
@@ -566,17 +580,36 @@ describe("Proxy integration", () => {
       );
 
       await backendConnected;
-      const clientClosed = once(clientSocket, "close");
       clientSocket.destroy();
 
-      await clientClosed;
+      const backendCloseTimeout = new Promise<"timeout">((resolve) => {
+        setTimeout(() => resolve("timeout"), 1000);
+      });
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      const backendCloseResult = await Promise.race([
+        backendClosed.then(() => "closed" as const),
+        backendCloseTimeout,
+      ]);
 
+      assert.equal(
+        backendCloseResult,
+        "closed",
+        "Backend socket should close after the client disconnects",
+      );
+
+      assert.ok(backendSocket?.destroyed);
       assert.equal(backend.activeConnections, 0);
     } finally {
-      clientServer.close();
-      silentBackendServer.close();
+      backendSocket?.destroy();
+
+      await Promise.all([
+        new Promise<void>((resolve) => {
+          clientServer.close(() => resolve());
+        }),
+        new Promise<void>((resolve) => {
+          silentBackendServer.close(() => resolve());
+        }),
+      ]);
     }
   });
 
